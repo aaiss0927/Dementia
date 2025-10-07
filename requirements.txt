@@ -1,0 +1,6 @@
+streamlit==1.50.0
+openai==1.109.1
+requests==2.32.3
+joblib==1.4.2
+streamlit-webrtc==0.63.11
+streamlit-drawable-canvas==0.9.3
