@@ -90,11 +90,15 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
     if audio_file_object is None: return 0, "STT: 오디오 파일 객체 부재"
     
     try:
+        # --- ✨ 수정된 부분 ✨ ---
+        # UploadedFile 객체에서 파일 이름과 바이트 데이터를 추출하여 튜플로 전달합니다.
+        # 이것이 400 에러를 해결하는 핵심입니다.
         transcript = client.audio.transcriptions.create(
             model=model_to_use, 
-            file=audio_file_object, 
+            file=(audio_file_object.name, audio_file_object.getvalue()), 
             language="ko"
         ).text.lower()
+        # --- 수정 끝 ---
             
         if target_keywords: 
             if any(keyword.lower() in transcript for keyword in target_keywords): score = 1
@@ -110,7 +114,7 @@ def score_llm_writing(writing_text):
     """OpenAI GPT 모델을 사용하여 글쓰기 점수(0 또는 1)를 부여합니다. (Q19)"""
     if client is None or not writing_text: return 0
     system_prompt = ("당신은 인지 기능 평가 전문가입니다. 사용자 글이 주어진 주제('날씨 또는 기분')에 대해 '하나의 온전한 문장'인지 판단하고, "
-                    "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
+                     "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
     
     try:
         response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"사용자 글: '{writing_text}'"}], temperature=0)
@@ -203,7 +207,7 @@ def app():
         
         # Q11, Q13 등록/회상
         st.header("🍎 기억")
-        q11_input = st.text_input("Q11: 세 가지 물건 이름을 따라 말하세요.", key='q11_input')
+        q11_input = st.text_input("Q11: 세 가지 물건 이름을 따라 말하세요.", key='q11_input', placeholder="사과, 세탁기, 책상")
         q11_score = score_registration_recall(q11_input, target_words)
         st.session_state.features['Q11_1'] = st.session_state.features['Q11_2'] = st.session_state.features['Q11_3'] = q11_score
         
@@ -219,7 +223,7 @@ def app():
         for i, answer in enumerate(q12_answers):
             with q12_cols[i]:
                 q12_input = st.number_input(f"Q12_{i+1}", key=f'q12_{i+1}', step=1, value=None, format="%d")
-                score = 1 if q12_input and int(q12_input) == answer else 0
+                score = 1 if q12_input is not None and int(q12_input) == answer else 0
                 st.session_state.features[f'Q12_{i+1}'] = score
         st.markdown("---")
         
@@ -307,12 +311,14 @@ def app():
         # Q15 처리
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
+            # Q15는 따라 말하기이므로 특별한 키워드 없이 전사 자체에 성공하면 점수를 줍니다.
             q15_score, q15_transcript = score_stt_response(st.session_state.q15_audio_file, target_keywords=None)
         st.session_state.features['Q15'] = q15_score
         
         # Q18 처리
         q18_score, q18_transcript = 0, "파일 없음"
         if st.session_state.q18_audio_file:
+            # Q18은 '눈을 감으세요'라는 문장이 포함되어야 합니다.
             q18_score, q18_transcript = score_stt_response(st.session_state.q18_audio_file, target_keywords=["눈을 감으세요"]) 
         st.session_state.features['Q18'] = q18_score
 
@@ -348,8 +354,11 @@ def app():
             st.error(result_text)
         
         st.subheader("📊 채점 결과 요약")
+        # MMSE_KIND는 2로 고정, DIAG_SEQ는 1로 고정이지만 점수 합산에서는 제외해야 합니다.
+        # Q11과 Q13은 3개 문항이 1점으로 처리되므로, 합산 시 주의해야 합니다. 
+        # 본 MMSE 버전에서는 각 문항이 개별 점수로 취급되므로 그대로 더합니다.
         total_score = input_df.iloc[0].drop(['DIAG_SEQ', 'MMSE_KIND']).sum()
-        st.metric(label="총 점수 (Max 26점)", value=f"{total_score}점")
+        st.metric(label="총 점수 (Max 30점)", value=f"{total_score}점")
         
         st.caption(f"Q15 (따라 말하기) 채점: {q15_score}점 (STT 전사: {q15_transcript[:50]}...)")
         st.caption(f"Q18 (읽고 수행) 채점: {q18_score}점 (STT 전사: {q18_transcript[:50]}...)")
@@ -360,6 +369,4 @@ def app():
 
 
 if __name__ == "__main__":
-    from PIL import Image
-    import io
     app()
