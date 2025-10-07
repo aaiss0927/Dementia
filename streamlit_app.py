@@ -14,6 +14,7 @@ import io
 import warnings
 import random
 
+# 경고 메시지 비활성화
 warnings.filterwarnings('ignore')
 
 # --- 0. 전역 설정 및 API 클라이언트 초기화 ---
@@ -23,7 +24,7 @@ try:
 except Exception:
     client = None
 
-# 모델/스케일러 파일 경로 (더미 로딩 대비)
+# 모델/스케일러 파일 경로
 MODEL_FILE = 'final_model.joblib'
 SCALER_FILE = 'final_scaler.joblib'
 RANDOM_STATE = 42
@@ -35,6 +36,7 @@ def load_model_and_scaler():
     try:
         model = joblib.load(MODEL_FILE)
         scaler = joblib.load(SCALER_FILE)
+        st.success("✅ 모델과 스케일러 로드 완료.")
         return model, scaler
     except FileNotFoundError:
         class DummyModel:
@@ -42,6 +44,7 @@ def load_model_and_scaler():
             def predict_proba(self, X): return np.array([[0.5, 0.5]])
         class DummyScaler:
             def transform(self, X): return X
+        st.error("⚠️ 모델/스케일러 파일 없음. 더미 모델 사용.")
         return DummyModel(), DummyScaler()
 
 model, scaler = load_model_and_scaler()
@@ -56,7 +59,7 @@ def get_current_korean_season(month):
     else: return "겨울"
 
 def score_time_date(q_num, user_input, current_dt):
-    """지남력 문항 채점"""
+    """Q01 ~ Q05 시간/날짜 지남력 채점 로직"""
     score = 0
     if q_num == 1 and user_input == str(current_dt.year): score = 1
     elif q_num == 2 and user_input == get_current_korean_season(current_dt.month): score = 1
@@ -69,7 +72,7 @@ def score_time_date(q_num, user_input, current_dt):
 
 @st.cache_data
 def get_user_location():
-    """IP 기반 위치 정보 반환 (캐싱)"""
+    """공개 IP 기반으로 사용자 위치 (국가, 도시)를 가져옵니다."""
     try:
         ip_response = requests.get('https://api.ipify.org?format=json')
         public_ip = ip_response.json()['ip']
@@ -81,36 +84,32 @@ def get_user_location():
     except Exception:
         return "알 수 없음", "알 수 없음"
 
-def score_stt_response(audio_file_path, target_keywords=None, model_to_use="whisper-1"):
-    """Whisper API를 사용하여 오디오 파일 채점"""
+def score_stt_response(audio_file_object, target_keywords=None, model_to_use="whisper-1"):
+    """OpenAI Whisper API를 사용하여 UploadedFile 객체를 직접 전송하여 채점합니다."""
     if client is None: return 0, "STT API 클라이언트 오류"
-    if not audio_file_path or not os.path.exists(audio_file_path): 
-        return 0, f"STT: 오디오 파일 없음 또는 경로 오류: {audio_file_path}"
-        
+    if audio_file_object is None: return 0, "STT: 오디오 파일 객체 부재"
+    
     try:
-        # 파일 크기 확인 (5MB 이하 권장, API 제한)
-        if os.path.getsize(audio_file_path) == 0:
-            return 0, "STT 처리 오류: 오디오 파일 내용이 비어있습니다."
-            
-        with open(audio_file_path, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(model=model_to_use, file=audio_file, language="ko").text.lower()
+        transcript = client.audio.transcriptions.create(
+            model=model_to_use, 
+            file=audio_file_object, 
+            language="ko"
+        ).text.lower()
             
         if target_keywords: 
             if any(keyword.lower() in transcript for keyword in target_keywords): score = 1
             else: score = 0
             return score, transcript
         else:
-            # Q15는 발음의 정확성을 판단해야 하나, 여기서는 전사 성공 시 1점 부여로 간소화
-            return 1, transcript 
+            return 1, transcript
         
     except Exception as e:
-        # API 오류 (400 Bad Request 등) 발생 시 상세 에러 메시지 반환
         return 0, f"STT 처리 오류: {e}"
 
 def score_llm_writing(writing_text):
-    """LLM을 사용하여 Q19 문장 채점"""
+    """OpenAI GPT 모델을 사용하여 글쓰기 점수(0 또는 1)를 부여합니다. (Q19)"""
     if client is None or not writing_text: return 0
-    system_prompt = ("당신은 인지 기능 평가 전문가입니다. 사용자 글이 주어진 주제에 대해 '하나의 온전한 문장'인지 판단하고, "
+    system_prompt = ("당신은 인지 기능 평가 전문가입니다. 사용자 글이 주어진 주제('날씨 또는 기분')에 대해 '하나의 온전한 문장'인지 판단하고, "
                     "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
     
     try:
@@ -147,7 +146,6 @@ def score_registration_recall(user_input, target_words):
     """Q11, Q13 단어 등록/회상 채점"""
     user_words = set(re.findall(r'\b\w+\b', user_input.replace(',', ' ').lower()))
     target_set = set(target_words)
-    # 입력된 단어 집합이 목표 단어 집합을 모두 포함하는 경우 1점 (엄격한 채점 기준)
     return 1 if target_set.issubset(user_words) else 0
 
 # --- 3. Streamlit UI 구성 ---
@@ -225,7 +223,7 @@ def app():
                 st.session_state.features[f'Q12_{i+1}'] = score
         st.markdown("---")
         
-        # --- Q15, Q18 파일 업로드 섹션 (폼 내부) ---
+        # Q15, Q18 파일 업로드 섹션 (STT 오류 방지 및 폼 내부)
         st.header("🎤 STT 오디오 파일 업로드")
         st.info("Q15/Q18 점수를 받으려면 **.wav, .mp3, .m4a** 파일을 업로드해야 합니다. 파일이 없으면 0점 처리됩니다.")
         
@@ -233,17 +231,15 @@ def app():
         with col_q15:
             st.subheader("Q15: 따라 말하기")
             st.caption("'_간장 공장 공장장_'을 녹음한 파일을 올려주세요.")
-            # m4a 형식 추가
             q15_uploaded_file = st.file_uploader("Q15 오디오 파일", type=['wav', 'mp3', 'm4a'], key="uploader_q15")
             st.session_state.q15_audio_file = q15_uploaded_file
         with col_q18:
             st.subheader("Q18: 문장 읽고 수행")
             st.caption("'_눈을 감으세요_'를 읽은 파일을 올려주세요.")
-            # m4a 형식 추가
             q18_uploaded_file = st.file_uploader("Q18 오디오 파일", type=['wav', 'mp3', 'm4a'], key="uploader_q18")
             st.session_state.q18_audio_file = q18_uploaded_file
         st.markdown("---")
-        
+
         # Q14 (이름 대기)
         st.header("🗣️ 언어 및 실행 능력")
         st.subheader("Q14: 이름 대기")
@@ -274,6 +270,7 @@ def app():
         if canvas_result.image_data is not None:
             image_array = canvas_result.image_data
             if image_array.size > 0:
+                # NumPy 배열을 PIL Image 객체로 변환하여 Data URL 생성
                 pil_image = Image.fromarray(image_array.astype('uint8'), 'RGBA')
                 buffered = io.BytesIO()
                 pil_image.save(buffered, format="PNG")
@@ -305,25 +302,18 @@ def app():
             q17_score, q17_vision_status = score_drawing_similarity(q17_original_image_url, st.session_state.q17_drawing_data_url)
         st.session_state.features['Q17'] = q17_score
         
-        # 2. STT 최종 채점 (Q15, Q18) - 임시 파일로 저장 후 API 호출
+        # 2. STT 최종 채점 (Q15, Q18) - UploadedFile 객체를 직접 전달
         
         # Q15 처리
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
-            temp_path = f"temp_q15_{st.session_state.q15_audio_file.name}"
-            # getbuffer()를 사용하여 파일 내용을 바이트로 읽고 임시 저장
-            with open(temp_path, "wb") as f: f.write(st.session_state.q15_audio_file.getbuffer())
-            q15_score, q15_transcript = score_stt_response(temp_path, target_keywords=None)
-            if os.path.exists(temp_path): os.remove(temp_path) # 사용 후 삭제
+            q15_score, q15_transcript = score_stt_response(st.session_state.q15_audio_file, target_keywords=None)
         st.session_state.features['Q15'] = q15_score
         
         # Q18 처리
         q18_score, q18_transcript = 0, "파일 없음"
         if st.session_state.q18_audio_file:
-            temp_path = f"temp_q18_{st.session_state.q18_audio_file.name}"
-            with open(temp_path, "wb") as f: f.write(st.session_state.q18_audio_file.getbuffer())
-            q18_score, q18_transcript = score_stt_response(temp_path, target_keywords=["눈을 감으세요"])
-            if os.path.exists(temp_path): os.remove(temp_path)
+            q18_score, q18_transcript = score_stt_response(st.session_state.q18_audio_file, target_keywords=["눈을 감으세요"]) 
         st.session_state.features['Q18'] = q18_score
 
         # 3. 모델 입력 준비 및 예측
@@ -341,7 +331,6 @@ def app():
 
         # 예측 수행
         if model is not None and scaler is not None:
-            # 모델 예측 로직 (시뮬레이션 또는 실제 로직)
             input_scaled = scaler.transform(input_df)
             prediction = model.predict(input_scaled)
             result_text = "Dem (치매/위험군)" if prediction[0] == 'Dem' else "CN (정상)"
