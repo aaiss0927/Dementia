@@ -77,45 +77,42 @@ def get_user_location():
     except Exception:
         return "알 수 없음", "알 수 없음"
 
+# --- ✨ 최종 수정된 STT 채점 함수 ✨ ---
 def score_stt_response(audio_file_object, target_keywords=None, model_to_use="whisper-1"):
     """
-    OpenAI Whisper API를 사용하여 UploadedFile 객체를 디스크에 임시 저장 후 전송합니다.
+    [최종 수정] 파일을 디스크에 저장하지 않고 메모리에서 직접 API로 전송합니다.
+    이 방식이 클라우드 환경에서 가장 안정적입니다.
     """
-    if client is None: return 0, "STT API 클라이언트 오류"
-    if audio_file_object is None: return 0, "STT: 오디오 파일 객체 부재"
-    
-    # 임시 파일 이름을 고유하게 생성
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
-    temp_file_name = f"temp_stt_{timestamp}_{audio_file_object.name}" 
-    
+    if client is None: 
+        return 0, "STT API 클라이언트 오류"
+    if audio_file_object is None: 
+        return 0, "STT: 오디오 파일 객체 부재"
+
+    # 1. 업로드된 파일의 내용을 메모리로 읽어옵니다.
+    audio_bytes = audio_file_object.getvalue()
+
+    # 2. 파일 내용이 비어있는지 확인합니다. (오류 방지)
+    if not audio_bytes:
+        return 0, "STT 처리 오류: 오디오 파일이 비어 있습니다."
+
     try:
-        # UploadedFile 객체의 내용을 임시 파일로 저장
-        with open(temp_file_name, "wb") as f:
-            f.write(audio_file_object.getbuffer())
-        
-        # 임시 파일 경로를 사용하여 API 호출
-        with open(temp_file_name, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model=model_to_use, 
-                file=audio_file, 
-                language="ko"
-            ).text.lower()
-            
-        # 채점 로직
+        # 3. (파일 이름, 파일 내용) 튜플 형태로 API에 직접 전달합니다.
+        transcript = client.audio.transcriptions.create(
+            model=model_to_use,
+            file=(audio_file_object.name, audio_bytes), 
+            language="ko"
+        ).text.lower()
+
+        # 채점 로직은 동일합니다.
         if target_keywords: 
-            if any(keyword.lower() in transcript for keyword in target_keywords): score = 1
-            else: score = 0
+            score = 1 if any(keyword.lower() in transcript for keyword in target_keywords) else 0
             return score, transcript
         else:
             return 1, transcript
             
     except Exception as e:
-        return 0, f"STT 처리 오류: {e}"
-        
-    finally:
-        # 사용 후 임시 파일 즉시 삭제
-        if os.path.exists(temp_file_name):
-            os.remove(temp_file_name)
+        # API에서 오는 에러 메시지를 직접 확인하는 것이 디버깅에 더 좋습니다.
+        return 0, f"STT API 처리 오류: {e}"
 
 def score_llm_writing(writing_text):
     if client is None or not writing_text: return 0
@@ -309,23 +306,19 @@ def app():
             q17_score, q17_vision_status = score_drawing_similarity(q17_original_image_url, st.session_state.q17_drawing_data_url)
         st.session_state.features['Q17'] = q17_score
         
-        # --- ✨ 수정된 부분 ✨ ---
         # 2. STT 최종 채점: UploadedFile 객체를 채점 함수에 직접 전달
         
         # Q15 처리
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
-            # 임시 파일 생성 로직을 제거하고 파일 객체를 바로 넘깁니다.
             q15_score, q15_transcript = score_stt_response(st.session_state.q15_audio_file, target_keywords=None)
         st.session_state.features['Q15'] = q15_score
         
         # Q18 처리
         q18_score, q18_transcript = 0, "파일 없음"
         if st.session_state.q18_audio_file:
-            # 임시 파일 생성 로직을 제거하고 파일 객체를 바로 넘깁니다.
             q18_score, q18_transcript = score_stt_response(st.session_state.q18_audio_file, target_keywords=["눈을 감으세요"])
         st.session_state.features['Q18'] = q18_score
-        # --- 수정 끝 ---
 
         # 3. 모델 입력 준비 및 예측
         features_for_model = {**st.session_state.basic_info, **st.session_state.features}
