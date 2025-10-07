@@ -7,12 +7,10 @@ import joblib
 import requests
 import os
 from openai import OpenAI
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, MediaStreamConstraints
 from streamlit_drawable_canvas import st_canvas
-from PIL import Image # NumPy 저장 오류 해결을 위해 필요
+from PIL import Image
 import base64
 import io
-import warnings
 import random
 
 warnings.filterwarnings('ignore')
@@ -26,19 +24,17 @@ except Exception:
 # 모델/스케일러 파일 경로
 MODEL_FILE = 'final_model.joblib'
 SCALER_FILE = 'final_scaler.joblib'
-RANDOM_STATE = 42
+RANDOM_STATE = 96
 
 # --- 1. 모델 및 스케일러 로딩 ---
 @st.cache_resource
 def load_model_and_scaler():
-    """실제 학습된 모델과 스케일러를 로드합니다."""
     try:
         model = joblib.load(MODEL_FILE)
         scaler = joblib.load(SCALER_FILE)
         st.success("✅ 모델과 스케일러 로드 완료.")
         return model, scaler
     except FileNotFoundError:
-        # 더미 모델 (실제 배포 시 이 부분 삭제)
         class DummyModel:
             def predict(self, X): return np.array([random.choice(['Dem', 'CN'])])
             def predict_proba(self, X): return np.array([[0.5, 0.5]])
@@ -58,17 +54,13 @@ def get_current_korean_season(month):
 
 def score_time_date(q_num, user_input, current_dt):
     score = 0
-    if q_num == 1: 
-        if user_input == str(current_dt.year): score = 1
-    elif q_num == 2:
-        if user_input == get_current_korean_season(current_dt.month): score = 1
-    elif q_num == 3:
-        if user_input == str(current_dt.day): score = 1
+    if q_num == 1 and user_input == str(current_dt.year): score = 1
+    elif q_num == 2 and user_input == get_current_korean_season(current_dt.month): score = 1
+    elif q_num == 3 and user_input == str(current_dt.day): score = 1
     elif q_num == 4:
         korean_day = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"][current_dt.weekday()]
         if user_input == korean_day: score = 1
-    elif q_num == 5:
-        if user_input == str(current_dt.month): score = 1
+    elif q_num == 5 and user_input == str(current_dt.month): score = 1
     return score
 
 @st.cache_data
@@ -85,8 +77,10 @@ def get_user_location():
         return "알 수 없음", "알 수 없음"
 
 def score_stt_response(audio_file_path, target_keywords=None, model_to_use="whisper-1"):
+    # 오디오 파일이 실제로 유효한지 확인하고 API 호출
     if client is None: return 0, "STT API 클라이언트 오류"
-    if not audio_file_path or not os.path.exists(audio_file_path): return 0, f"STT: 오디오 파일 없음 또는 경로 오류: {audio_file_path}"
+    if not audio_file_path or not os.path.exists(audio_file_path): 
+        return 0, f"STT: 오디오 파일 없음 또는 경로 오류: {audio_file_path}"
         
     try:
         with open(audio_file_path, "rb") as audio_file:
@@ -123,7 +117,7 @@ def score_drawing_similarity(original_image_url, user_drawing_data_url):
             model="gpt-4o",
             messages=[
                 {"role": "user", "content": [
-                    {"type": "text", "text": "첫 번째 그림(원본)을 두 번째 그림(사용자가 그린 그림)이 얼마나 잘 모사했는지 평가하고, '1' (매우 유사) 또는 '0' (유사하지 않음)으로만 답해주세요. 다른 설명은 하지 마세요."},
+                    {"type": "text", "text": "첫 번째 그림(원본)을 두 번째 그림(사용자가 그린 그림)이 얼마나 잘 모사했는지 평가하고, '1' (매우 유사) 또는 '0' (유사하지 않음)으로만 답해주세요."},
                     {"type": "image_url", "image_url": {"url": original_image_url, "detail": "low"}},
                     {"type": "image_url", "image_url": {"url": user_drawing_data_url, "detail": "low"}},
                 ]},
@@ -141,69 +135,43 @@ def score_registration_recall(user_input, target_words):
     target_set = set(target_words)
     return 1 if target_set.issubset(user_words) else 0
 
-def st_webrtc_audio_recorder(key, component_label):
-    """
-    STT 녹음 컴포넌트 (폼 외부 호출용)
-    """
-    audio_path_key = f"{key}_audio_path"
-    if audio_path_key not in st.session_state: st.session_state[audio_path_key] = None
-
-    webrtc_ctx = webrtc_streamer(
-        key=key,
-        mode=WebRtcMode.SENDONLY,
-        media_stream_constraints=MediaStreamConstraints(video=False, audio=True),
-        sendback_audio=False, 
-    )
-
-    if webrtc_ctx.state.playing:
-        st.success(f"🎤 {component_label} 녹음 중... (STOP 버튼을 눌러야 완료됩니다)")
-        # 실제 오디오 파일 저장이 없으므로, 더미 파일 경로만 설정
-        temp_audio_file = f"temp_audio_{key}.wav"
-        if not os.path.exists(temp_audio_file):
-            open(temp_audio_file, 'a').close() # 빈 파일 생성
-        st.session_state[audio_path_key] = temp_audio_file
-        
-    elif st.session_state.get(audio_path_key) and not webrtc_ctx.state.playing:
-        st.info(f"✅ {component_label} 녹음 준비 완료.")
-        
-    return st.session_state.get(audio_path_key)
-
 # --- 3. Streamlit UI 구성 ---
 
 def app():
     st.set_page_config(page_title="MMSE 간이 자가 진단 웹사이트", layout="wide")
-    st.title("🧠 MMSE 기반 간이 자가 진단 (고급 시뮬레이션)")
+    st.title("🧠 MMSE 기반 간이 자가 진단 (최종 통합 버전)")
     st.markdown("---")
     
     current_dt = datetime.datetime.now()
     user_country, user_city = get_user_location()
     target_words = {"사과", "세탁기", "책상"}
     
-    # 세션 상태 초기화 (최초 로드 시)
+    # 세션 상태 초기화
     if 'features' not in st.session_state:
         st.session_state.features = {k: 0 for k in ['Q01', 'Q02', 'Q03', 'Q04', 'Q05', 'Q06', 'Q07', 'Q08', 'Q09', 'Q10', 'Q11_1', 'Q11_2', 'Q11_3', 'Q12_1', 'Q12_2', 'Q12_3', 'Q12_4', 'Q12_5', 'Q13_1', 'Q13_2', 'Q13_3', 'Q14_1', 'Q14_2', 'Q15', 'Q16_1', 'Q16_2', 'Q16_3', 'Q17', 'Q18', 'Q19']}
         st.session_state.basic_info = {'SAMPLE_EMAIL': '', 'DIAG_SEQ': 1, 'MMSE_KIND': 2}
-        st.session_state.q15_audio_path = None
-        st.session_state.q18_audio_path = None
+        st.session_state.q15_audio_file = None # 업로드된 파일 객체 저장
+        st.session_state.q18_audio_file = None
         st.session_state.q17_drawing_data_url = None
+
+    # --- Q15, Q18 파일 업로드 섹션 (STT 오류 방지) ---
+    st.header("🎤 STT 파일 업로드 영역")
+    st.warning("녹음 파일이 없으면 0점 처리됩니다. **.wav, .mp3** 파일을 업로드하세요.")
     
-    # --- Q15, Q18 STT 컴포넌트 섹션 (폼 외부에 위치하여 오류 해결) ---
-    st.header("🎤 STT 사전 준비 영역 (START/STOP 버튼은 여기에 있습니다)")
     col_q15, col_q18 = st.columns(2)
     with col_q15:
         st.subheader("Q15: 따라 말하기")
-        st.caption("'_간장 공장 공장장_'을 마이크에 대고 말해보세요.")
-        q15_audio_file_path = st_webrtc_audio_recorder("Q15_recorder", "Q15 따라 말하기")
-        st.session_state.q15_audio_path = q15_audio_file_path
+        st.caption("'_간장 공장 공장장_'을 녹음한 파일을 올려주세요.")
+        q15_uploaded_file = st.file_uploader("Q15 오디오 파일", type=['wav', 'mp3'], key="uploader_q15")
+        st.session_state.q15_audio_file = q15_uploaded_file
     with col_q18:
         st.subheader("Q18: 문장 읽고 수행")
-        st.caption("'_눈을 감으세요_' 문장을 마이크에 대고 읽으세요.")
-        q18_audio_file_path = st_webrtc_audio_recorder("Q18_recorder", "Q18 읽고 수행")
-        st.session_state.q18_audio_path = q18_audio_file_path
+        st.caption("'_눈을 감으세요_'를 읽은 파일을 올려주세요.")
+        q18_uploaded_file = st.file_uploader("Q18 오디오 파일", type=['wav', 'mp3'], key="uploader_q18")
+        st.session_state.q18_audio_file = q18_uploaded_file
     st.markdown("---")
 
-
-    # --- 메인 폼 섹션 (모든 입력 위젯 포함) ---
+    # --- 메인 폼 섹션 ---
     with st.form(key='diagnosis_form'):
         
         # --- 기본 정보 ---
@@ -239,7 +207,7 @@ def app():
         
         # Q11, Q13 등록/회상
         st.header("🍎 기억")
-        q11_input = st.text_input("Q11: 단어 등록", key='q11_input')
+        q11_input = st.text_input("Q11: 세 가지 물건 이름을 따라 말하세요.", key='q11_input')
         q11_score = score_registration_recall(q11_input, target_words)
         st.session_state.features['Q11_1'] = st.session_state.features['Q11_2'] = st.session_state.features['Q11_3'] = q11_score
         
@@ -283,15 +251,13 @@ def app():
         st.subheader("Q17: 따라 그리기")
         q17_original_image_url = "https://i.imgur.com/gK9p5Fz.png"
         st.image(q17_original_image_url, caption="원본 그림: 오각형과 사각형", width=150)
-        
         canvas_result = st_canvas(stroke_width=3, stroke_color="#000000", width=250, height=250, drawing_mode="freedraw", key="canvas")
-        
+
         # Q17 Drawing Data URL 저장 로직
         if canvas_result.image_data is not None:
-            image_array = canvas_result.image_data 
+            image_array = canvas_result.image_data
             if image_array.size > 0:
-                # NumPy 배열을 PIL Image 객체로 변환하여 Data URL 생성
-                pil_image = Image.fromarray(image_array.astype('uint8'), 'RGBA') 
+                pil_image = Image.fromarray(image_array.astype('uint8'), 'RGBA')
                 buffered = io.BytesIO()
                 pil_image.save(buffered, format="PNG")
                 img_str = base64.b64encode(buffered.getvalue()).decode()
@@ -317,13 +283,30 @@ def app():
         st.session_state.features['Q19'] = q19_score
         
         q17_original_image_url = "https://i.imgur.com/gK9p5Fz.png"
-        q17_score, q17_vision_status = score_drawing_similarity(q17_original_image_url, st.session_state.q17_drawing_data_url)
+        q17_score, q17_vision_status = 0, "그린 그림 없음"
+        if st.session_state.q17_drawing_data_url:
+            q17_score, q17_vision_status = score_drawing_similarity(q17_original_image_url, st.session_state.q17_drawing_data_url)
         st.session_state.features['Q17'] = q17_score
         
-        # 2. STT 최종 채점 (Q15, Q18)
-        q15_score, q15_transcript = score_stt_response(st.session_state.q15_audio_path, target_keywords=None)
+        # 2. STT 최종 채점 (Q15, Q18) - 파일 업로드 객체를 사용
+        # 오디오 파일 처리: Streamlit FileUploader 객체는 getbuffer()를 통해 메모리에서 처리
+        
+        # Q15 처리
+        q15_score, q15_transcript = 0, "파일 없음"
+        if st.session_state.q15_audio_file:
+            temp_path = "temp_q15.wav"
+            with open(temp_path, "wb") as f: f.write(st.session_state.q15_audio_file.getbuffer())
+            q15_score, q15_transcript = score_stt_response(temp_path, target_keywords=None)
+            os.remove(temp_path) # 사용 후 삭제
         st.session_state.features['Q15'] = q15_score
-        q18_score, q18_transcript = score_stt_response(st.session_state.q18_audio_path, target_keywords=["눈을 감으세요"]) 
+        
+        # Q18 처리
+        q18_score, q18_transcript = 0, "파일 없음"
+        if st.session_state.q18_audio_file:
+            temp_path = "temp_q18.wav"
+            with open(temp_path, "wb") as f: f.write(st.session_state.q18_audio_file.getbuffer())
+            q18_score, q18_transcript = score_stt_response(temp_path, target_keywords=["눈을 감으세요"])
+            os.remove(temp_path)
         st.session_state.features['Q18'] = q18_score
 
         # 3. 모델 입력 준비 및 예측
@@ -343,7 +326,7 @@ def app():
         if model is not None and scaler is not None:
             input_scaled = scaler.transform(input_df)
             prediction = model.predict(input_scaled)
-            result_text = "Dem (치매/위험군)" if prediction[0] == 'Dem' else "CN (정상)" 
+            result_text = "Dem (치매/위험군)" if prediction[0] == 'Dem' else "CN (정상)"
         else:
             result_text = "모델 로드 실패"
 
