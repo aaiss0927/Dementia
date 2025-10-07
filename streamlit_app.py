@@ -89,7 +89,7 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
     # 1. 🔥 임시 파일 경로 설정 및 저장 🔥
     # 파일명에 현재 시간과 원본 파일명을 조합하여 고유성 보장
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
-    temp_file_name = f"temp_stt_{timestamp}_{audio_file_object.name}"
+    temp_file_name = f"temp_stt_{timestamp}_{audio_file_object}"
     
     try:
         # UploadedFile 객체의 내용을 임시 파일로 저장
@@ -317,7 +317,7 @@ def app():
         # Q15 처리
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
-            temp_path = f"temp_q15_{st.session_state.q15_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
+            temp_path = f"temp_q15_{st.session_state.q15_audio_file}_{datetime.datetime.now().strftime('%M%S')}"
             # 디스크 임시 저장
             with open(temp_path, "wb") as f: f.write(st.session_state.q15_audio_file.getbuffer())
             q15_score, q15_transcript = score_stt_response(temp_path, target_keywords=None)
@@ -327,7 +327,7 @@ def app():
         # Q18 처리
         q18_score, q18_transcript = 0, "파일 없음"
         if st.session_state.q18_audio_file:
-            temp_path = f"temp_q18_{st.session_state.q18_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
+            temp_path = f"temp_q18_{st.session_state.q18_audio_file}_{datetime.datetime.now().strftime('%M%S')}"
             with open(temp_path, "wb") as f: f.write(st.session_state.q18_audio_file.getbuffer())
             q18_score, q18_transcript = score_stt_response(temp_path, target_keywords=["눈을 감으세요"])
             if os.path.exists(temp_path): os.remove(temp_path)
