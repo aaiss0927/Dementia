@@ -34,7 +34,6 @@ def load_model_and_scaler():
     try:
         model = joblib.load(MODEL_FILE)
         scaler = joblib.load(SCALER_FILE)
-        st.success("✅ 모델과 스케일러 로드 완료.")
         return model, scaler
     except FileNotFoundError:
         class DummyModel:
@@ -42,7 +41,6 @@ def load_model_and_scaler():
             def predict_proba(self, X): return np.array([[0.5, 0.5]])
         class DummyScaler:
             def transform(self, X): return X
-        st.error("⚠️ 모델/스케일러 파일 없음. 더미 모델 사용.")
         return DummyModel(), DummyScaler()
 
 model, scaler = load_model_and_scaler()
@@ -86,9 +84,8 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
     if client is None: return 0, "STT API 클라이언트 오류"
     if audio_file_object is None: return 0, "STT: 오디오 파일 객체 부재"
     
-    # 1. 🔥 임시 파일 경로 설정 및 저장 🔥
-    # UploadedFile 객체의 .name 속성을 사용
-    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    # 임시 파일 이름을 고유하게 생성
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
     temp_file_name = f"temp_stt_{timestamp}_{audio_file_object.name}" 
     
     try:
@@ -96,7 +93,7 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
         with open(temp_file_name, "wb") as f:
             f.write(audio_file_object.getbuffer())
         
-        # 2. 임시 파일 경로를 사용하여 API 호출
+        # 임시 파일 경로를 사용하여 API 호출
         with open(temp_file_name, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
                 model=model_to_use, 
@@ -104,7 +101,7 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
                 language="ko"
             ).text.lower()
             
-        # 3. 채점 로직
+        # 채점 로직
         if target_keywords: 
             if any(keyword.lower() in transcript for keyword in target_keywords): score = 1
             else: score = 0
@@ -116,14 +113,14 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
         return 0, f"STT 처리 오류: {e}"
         
     finally:
-        # 4. 사용 후 임시 파일 즉시 삭제
+        # 사용 후 임시 파일 즉시 삭제
         if os.path.exists(temp_file_name):
             os.remove(temp_file_name)
 
 def score_llm_writing(writing_text):
     if client is None or not writing_text: return 0
     system_prompt = ("당신은 인지 기능 평가 전문가입니다. 사용자 글이 주어진 주제('날씨 또는 기분')에 대해 '하나의 온전한 문장'인지 판단하고, "
-                    "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
+                     "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
     
     try:
         response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"사용자 글: '{writing_text}'"}], temperature=0)
@@ -312,25 +309,23 @@ def app():
             q17_score, q17_vision_status = score_drawing_similarity(q17_original_image_url, st.session_state.q17_drawing_data_url)
         st.session_state.features['Q17'] = q17_score
         
-        # 2. STT 최종 채점 (Q15, Q18) - 임시 디스크 저장 방식으로 최종 해결
+        # --- ✨ 수정된 부분 ✨ ---
+        # 2. STT 최종 채점: UploadedFile 객체를 채점 함수에 직접 전달
         
         # Q15 처리
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
-            temp_path = f"temp_q15_{st.session_state.q15_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
-            with open(temp_path, "wb") as f: f.write(st.session_state.q15_audio_file.getbuffer())
-            q15_score, q15_transcript = score_stt_response(temp_path, target_keywords=None)
-            if os.path.exists(temp_path): os.remove(temp_path)
+            # 임시 파일 생성 로직을 제거하고 파일 객체를 바로 넘깁니다.
+            q15_score, q15_transcript = score_stt_response(st.session_state.q15_audio_file, target_keywords=None)
         st.session_state.features['Q15'] = q15_score
         
         # Q18 처리
         q18_score, q18_transcript = 0, "파일 없음"
         if st.session_state.q18_audio_file:
-            temp_path = f"temp_q18_{st.session_state.q18_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
-            with open(temp_path, "wb") as f: f.write(st.session_state.q18_audio_file.getbuffer())
-            q18_score, q18_transcript = score_stt_response(temp_path, target_keywords=["눈을 감으세요"])
-            if os.path.exists(temp_path): os.remove(temp_path)
+            # 임시 파일 생성 로직을 제거하고 파일 객체를 바로 넘깁니다.
+            q18_score, q18_transcript = score_stt_response(st.session_state.q18_audio_file, target_keywords=["눈을 감으세요"])
         st.session_state.features['Q18'] = q18_score
+        # --- 수정 끝 ---
 
         # 3. 모델 입력 준비 및 예측
         features_for_model = {**st.session_state.basic_info, **st.session_state.features}
@@ -376,6 +371,4 @@ def app():
 
 
 if __name__ == "__main__":
-    from PIL import Image
-    import io
     app()
