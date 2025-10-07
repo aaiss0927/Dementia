@@ -34,6 +34,7 @@ def load_model_and_scaler():
     try:
         model = joblib.load(MODEL_FILE)
         scaler = joblib.load(SCALER_FILE)
+        st.success("✅ 모델과 스케일러 로드 완료.")
         return model, scaler
     except FileNotFoundError:
         class DummyModel:
@@ -41,6 +42,7 @@ def load_model_and_scaler():
             def predict_proba(self, X): return np.array([[0.5, 0.5]])
         class DummyScaler:
             def transform(self, X): return X
+        st.error("⚠️ 모델/스케일러 파일 없음. 더미 모델 사용.")
         return DummyModel(), DummyScaler()
 
 model, scaler = load_model_and_scaler()
@@ -85,7 +87,7 @@ def score_stt_response(audio_file_object, target_keywords=None, model_to_use="wh
     if audio_file_object is None: return 0, "STT: 오디오 파일 객체 부재"
     
     # 1. 🔥 임시 파일 경로 설정 및 저장 🔥
-    # UploadedFile 객체의 .name 속성은 안전하게 접근 가능
+    # UploadedFile 객체의 .name 속성을 사용
     timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
     temp_file_name = f"temp_stt_{timestamp}_{audio_file_object.name}" 
     
@@ -316,10 +318,9 @@ def app():
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
             temp_path = f"temp_q15_{st.session_state.q15_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
-            # 디스크 임시 저장
             with open(temp_path, "wb") as f: f.write(st.session_state.q15_audio_file.getbuffer())
             q15_score, q15_transcript = score_stt_response(temp_path, target_keywords=None)
-            if os.path.exists(temp_path): os.remove(temp_path) # 사용 후 삭제
+            if os.path.exists(temp_path): os.remove(temp_path)
         st.session_state.features['Q15'] = q15_score
         
         # Q18 처리
