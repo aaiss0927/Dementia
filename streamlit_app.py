@@ -7,12 +7,16 @@ import joblib
 import requests
 import os
 from openai import OpenAI
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, MediaStreamConstraints
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, MediaStreamConstraints, AudioProcessorBase
 from streamlit_drawable_canvas import st_canvas
 import base64
 import random # 더미 모델용
 from PIL import Image
 import io
+from typing import List, Union
+import av # media 파일 처리 라이브러리 (streamlit-webrtc와 함께 사용됨)
+from pydub import AudioSegment # pydub을 사용하여 audio segment 처리 및 WAV 저장
+import threading # 오디오 데이터 처리를 위한 스레딩
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -177,42 +181,87 @@ def score_drawing_similarity(original_image_url, user_drawing_data_url):
     except Exception as e:
         return 0, f"Vision API 처리 오류: {e}"
 
+
+# Lock for thread safety during audio writing
+audio_data_lock = threading.Lock()
+# 녹음 데이터를 저장할 버퍼
+audio_buffers = {} 
+
+class MyAudioProcessor(AudioProcessorBase):
+    """
+    WebRTC로부터 오디오 프레임을 받아 버퍼에 저장하는 프로세서.
+    """
+    def __init__(self) -> None:
+        self.samples = []
+        self.lock = threading.Lock()
+
+    def recv(self, frame: av.AudioFrame) -> Union[av.AudioFrame, None]:
+        # 오디오 프레임을 samples 리스트에 추가
+        new_samples = frame.to_ndarray(format="s16", layout="mono")
+        with self.lock:
+            self.samples.append(new_samples)
+        
+        # 프레임을 그대로 반환하여 연결 유지
+        return frame
+
 def st_webrtc_audio_recorder(key, component_label):
     """
-    streamlit-webrtc를 사용해 오디오를 녹음하고, 녹음된 오디오를 파일로 저장합니다.
-    주의: 이 함수는 단순 시뮬레이션이며, 실제 오디오 저장 로직은 더 복잡합니다.
-    실제 배포 환경에서 HTTPS를 통해 마이크 접근 후, 오디오 데이터를 처리해야 합니다.
+    실제 오디오 데이터 저장을 위한 WebRTC 컴포넌트입니다.
     """
-    st.caption("클릭 후 브라우저 상단에서 마이크 사용을 허용해주세요. START/STOP 버튼으로 녹음을 제어합니다.")
-    
-    # st.session_state에 오디오 파일 경로를 저장하기 위한 키 설정
     audio_path_key = f"{key}_audio_path"
+    
+    # 세션 상태가 없으면 초기화
     if audio_path_key not in st.session_state:
         st.session_state[audio_path_key] = None
 
+    # AudioProcessor를 사용하여 스트림을 받아옵니다.
     webrtc_ctx = webrtc_streamer(
         key=key,
-        mode=WebRtcMode.SENDONLY,
+        mode=WebRtcMode.SENDRECV, # 오디오를 받고 보냄
         media_stream_constraints=MediaStreamConstraints(video=False, audio=True),
-        sendback_audio=False, # 오디오 데이터를 서버로 다시 보내지 않음 (여기서는 파일로 저장하지 않음)
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}, # STUN 서버 추가
+        audio_processor_factory=MyAudioProcessor, # 사용자 정의 프로세서 사용
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
     )
 
-    # 실제 오디오 데이터를 받아 파일로 저장하는 로직은 streamlit-webrtc의 콜백을 통해 구현해야 합니다.
-    # 여기서는 "녹음 완료" 버튼을 클릭하면 임시 파일 경로를 설정하는 것으로 대체합니다.
-    if webrtc_ctx.state.playing:
-        st.success(f"🎤 {component_label} 녹음 중...")
-        # 실제 녹음 데이터 처리 및 파일 저장은 이 컴포넌트의 콜백이나 JS 인터페이스를 통해 이뤄져야 합니다.
-        # 이 예시에서는 더미 파일 경로만 저장합니다.
-        temp_audio_file = f"temp_audio_{key}.wav"
-        if not os.path.exists(temp_audio_file):
-            # 실제 오디오 파일이 없으면 STT 오류가 나므로, 빈 파일을 생성하는 것으로 시뮬레이션
-            open(temp_audio_file, 'a').close()
-        st.session_state[audio_path_key] = temp_audio_file
-    elif st.session_state[audio_path_key] and not webrtc_ctx.state.playing:
-        st.info(f"✅ {component_label} 녹음 완료. 파일 준비됨: {st.session_state[audio_path_key]}")
+    # 오디오 데이터 처리 및 저장 버튼
+    if webrtc_ctx.audio_processor:
+        processor = webrtc_ctx.audio_processor
         
-    return st.session_state[audio_path_key]
+        # 녹음 데이터가 있다면 저장 버튼 활성화
+        if st.button(f"저장 및 채점 ({component_label})", key=f"{key}_save_btn"):
+            st.warning("처리 중입니다. 잠시 기다려주세요...")
+            
+            # 1. 버퍼에서 데이터 추출
+            with processor.lock:
+                all_samples = np.concatenate(processor.samples, axis=0) if processor.samples else None
+                processor.samples = [] # 데이터 추출 후 버퍼 초기화
+            
+            if all_samples is None or all_samples.size == 0:
+                st.error("녹음된 오디오 데이터가 없습니다.")
+                return None
+
+            # 2. NumPy 배열을 pydub AudioSegment로 변환 및 저장
+            try:
+                # s16 (16비트 정수)로 가정
+                audio_segment = AudioSegment(
+                    all_samples.tobytes(), 
+                    frame_rate=48000, # WebRTC 기본 샘플링 속도 (환경에 따라 다를 수 있음)
+                    sample_width=all_samples.dtype.itemsize, 
+                    channels=1
+                )
+                
+                temp_audio_file = f"uploaded_{key}_{datetime.datetime.now().strftime('%M%S')}.wav"
+                audio_segment.export(temp_audio_file, format="wav")
+                
+                st.session_state[audio_path_key] = temp_audio_file
+                st.success(f"✅ 오디오 파일 저장 완료: {temp_audio_file}")
+                return temp_audio_file
+                
+            except Exception as e:
+                st.error(f"오디오 저장 실패: {e}")
+                return None
+    
+    return st.session_state.get(audio_path_key)
 
 # --- 3. Streamlit UI 구성 ---
 
