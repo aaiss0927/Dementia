@@ -14,12 +14,10 @@ import io
 import warnings
 import random
 
-# 경고 메시지 비활성화
 warnings.filterwarnings('ignore')
 
 # --- 0. 전역 설정 및 API 클라이언트 초기화 ---
 try:
-    # st.secrets에서 API 키를 가져옵니다.
     client = OpenAI(api_key=st.secrets.get("openai_api_key"))
 except Exception:
     client = None
@@ -52,14 +50,12 @@ model, scaler = load_model_and_scaler()
 # --- 2. 채점 로직 함수 ---
 
 def get_current_korean_season(month):
-    """현재 월에 따른 한국 계절 반환 (간소화)"""
     if month in [3, 4, 5]: return "봄"
     elif month in [6, 7, 8]: return "여름"
     elif month in [9, 10, 11]: return "가을"
     else: return "겨울"
 
 def score_time_date(q_num, user_input, current_dt):
-    """Q01 ~ Q05 시간/날짜 지남력 채점 로직"""
     score = 0
     if q_num == 1 and user_input == str(current_dt.year): score = 1
     elif q_num == 2 and user_input == get_current_korean_season(current_dt.month): score = 1
@@ -72,7 +68,6 @@ def score_time_date(q_num, user_input, current_dt):
 
 @st.cache_data
 def get_user_location():
-    """공개 IP 기반으로 사용자 위치 (국가, 도시)를 가져옵니다."""
     try:
         ip_response = requests.get('https://api.ipify.org?format=json')
         public_ip = ip_response.json()['ip']
@@ -85,36 +80,50 @@ def get_user_location():
         return "알 수 없음", "알 수 없음"
 
 def score_stt_response(audio_file_object, target_keywords=None, model_to_use="whisper-1"):
-    """OpenAI Whisper API를 사용하여 UploadedFile 객체를 직접 전송하여 채점합니다."""
+    """
+    OpenAI Whisper API를 사용하여 UploadedFile 객체를 디스크에 임시 저장 후 전송합니다.
+    """
     if client is None: return 0, "STT API 클라이언트 오류"
     if audio_file_object is None: return 0, "STT: 오디오 파일 객체 부재"
     
+    # 1. 🔥 임시 파일 경로 설정 및 저장 🔥
+    # 파일명에 현재 시간과 원본 파일명을 조합하여 고유성 보장
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    temp_file_name = f"temp_stt_{timestamp}_{audio_file_object.name}"
+    
     try:
-        # --- ✨ 수정된 부분 ✨ ---
-        # UploadedFile 객체에서 파일 이름과 바이트 데이터를 추출하여 튜플로 전달합니다.
-        # 이것이 400 에러를 해결하는 핵심입니다.
-        transcript = client.audio.transcriptions.create(
-            model=model_to_use, 
-            file=(audio_file_object.name, audio_file_object.getvalue()), 
-            language="ko"
-        ).text.lower()
-        # --- 수정 끝 ---
+        # UploadedFile 객체의 내용을 임시 파일로 저장
+        with open(temp_file_name, "wb") as f:
+            f.write(audio_file_object.getbuffer())
+        
+        # 2. 임시 파일 경로를 사용하여 API 호출
+        with open(temp_file_name, "rb") as audio_file:
+            transcript = client.audio.transcriptions.create(
+                model=model_to_use, 
+                file=audio_file, 
+                language="ko"
+            ).text.lower()
             
+        # 3. 채점 로직
         if target_keywords: 
             if any(keyword.lower() in transcript for keyword in target_keywords): score = 1
             else: score = 0
             return score, transcript
         else:
             return 1, transcript
-        
+            
     except Exception as e:
         return 0, f"STT 처리 오류: {e}"
+        
+    finally:
+        # 4. 🔥 사용 후 임시 파일 즉시 삭제 🔥
+        if os.path.exists(temp_file_name):
+            os.remove(temp_file_name)
 
 def score_llm_writing(writing_text):
-    """OpenAI GPT 모델을 사용하여 글쓰기 점수(0 또는 1)를 부여합니다. (Q19)"""
     if client is None or not writing_text: return 0
     system_prompt = ("당신은 인지 기능 평가 전문가입니다. 사용자 글이 주어진 주제('날씨 또는 기분')에 대해 '하나의 온전한 문장'인지 판단하고, "
-                     "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
+                    "온전한 문장이면 '1', 아니면 '0'을 출력하세요. 다른 설명은 일절 포함하지 마세요.")
     
     try:
         response = client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": f"사용자 글: '{writing_text}'"}], temperature=0)
@@ -124,7 +133,6 @@ def score_llm_writing(writing_text):
         return 0
 
 def score_drawing_similarity(original_image_url, user_drawing_data_url):
-    """Vision API를 사용하여 Q17 그림 채점"""
     if client is None: return 0, "Vision API 클라이언트 오류"
     if not user_drawing_data_url: return 0, "그린 그림 데이터 없음"
 
@@ -147,7 +155,6 @@ def score_drawing_similarity(original_image_url, user_drawing_data_url):
         return 0, f"Vision API 처리 오류: {e}"
 
 def score_registration_recall(user_input, target_words):
-    """Q11, Q13 단어 등록/회상 채점"""
     user_words = set(re.findall(r'\b\w+\b', user_input.replace(',', ' ').lower()))
     target_set = set(target_words)
     return 1 if target_set.issubset(user_words) else 0
@@ -207,7 +214,7 @@ def app():
         
         # Q11, Q13 등록/회상
         st.header("🍎 기억")
-        q11_input = st.text_input("Q11: 세 가지 물건 이름을 따라 말하세요.", key='q11_input', placeholder="사과, 세탁기, 책상")
+        q11_input = st.text_input("Q11: 세 가지 물건 이름을 따라 말하세요.", key='q11_input')
         q11_score = score_registration_recall(q11_input, target_words)
         st.session_state.features['Q11_1'] = st.session_state.features['Q11_2'] = st.session_state.features['Q11_3'] = q11_score
         
@@ -223,13 +230,13 @@ def app():
         for i, answer in enumerate(q12_answers):
             with q12_cols[i]:
                 q12_input = st.number_input(f"Q12_{i+1}", key=f'q12_{i+1}', step=1, value=None, format="%d")
-                score = 1 if q12_input is not None and int(q12_input) == answer else 0
+                score = 1 if q12_input and int(q12_input) == answer else 0
                 st.session_state.features[f'Q12_{i+1}'] = score
         st.markdown("---")
         
-        # Q15, Q18 파일 업로드 섹션 (STT 오류 방지 및 폼 내부)
+        # Q15, Q18 파일 업로드 섹션
         st.header("🎤 STT 오디오 파일 업로드")
-        st.info("Q15/Q18 점수를 받으려면 **.wav, .mp3, .m4a** 파일을 업로드해야 합니다. 파일이 없으면 0점 처리됩니다.")
+        st.info("Q15/Q18 점수를 받으려면 **.wav, .mp3, .m4a** 파일을 업로드해야 합니다.")
         
         col_q15, col_q18 = st.columns(2)
         with col_q15:
@@ -243,7 +250,7 @@ def app():
             q18_uploaded_file = st.file_uploader("Q18 오디오 파일", type=['wav', 'mp3', 'm4a'], key="uploader_q18")
             st.session_state.q18_audio_file = q18_uploaded_file
         st.markdown("---")
-
+        
         # Q14 (이름 대기)
         st.header("🗣️ 언어 및 실행 능력")
         st.subheader("Q14: 이름 대기")
@@ -256,7 +263,7 @@ def app():
         st.session_state.features['Q14_2'] = 1 if '연필' in q14_2 else 0
 
         # Q16 (3단계 명령)
-        st.subheader("Q16: 3단계 명령 수행 (체크 시 수행 성공으로 가정)")
+        st.subheader("Q16: 3단계 명령 수행")
         q16_1 = st.checkbox("Q16_1: 종이를 뒤집었습니다.", key='q16_1')
         q16_2 = st.checkbox("Q16_2: 반으로 접었습니다.", key='q16_2')
         q16_3 = st.checkbox("Q16_3: 저에게 주었습니다.", key='q16_3')
@@ -274,7 +281,6 @@ def app():
         if canvas_result.image_data is not None:
             image_array = canvas_result.image_data
             if image_array.size > 0:
-                # NumPy 배열을 PIL Image 객체로 변환하여 Data URL 생성
                 pil_image = Image.fromarray(image_array.astype('uint8'), 'RGBA')
                 buffered = io.BytesIO()
                 pil_image.save(buffered, format="PNG")
@@ -306,20 +312,25 @@ def app():
             q17_score, q17_vision_status = score_drawing_similarity(q17_original_image_url, st.session_state.q17_drawing_data_url)
         st.session_state.features['Q17'] = q17_score
         
-        # 2. STT 최종 채점 (Q15, Q18) - UploadedFile 객체를 직접 전달
+        # 2. STT 최종 채점 (Q15, Q18) - 임시 디스크 저장 방식으로 최종 해결
         
         # Q15 처리
         q15_score, q15_transcript = 0, "파일 없음"
         if st.session_state.q15_audio_file:
-            # Q15는 따라 말하기이므로 특별한 키워드 없이 전사 자체에 성공하면 점수를 줍니다.
-            q15_score, q15_transcript = score_stt_response(st.session_state.q15_audio_file, target_keywords=None)
+            temp_path = f"temp_q15_{st.session_state.q15_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
+            # 디스크 임시 저장
+            with open(temp_path, "wb") as f: f.write(st.session_state.q15_audio_file.getbuffer())
+            q15_score, q15_transcript = score_stt_response(temp_path, target_keywords=None)
+            if os.path.exists(temp_path): os.remove(temp_path) # 사용 후 삭제
         st.session_state.features['Q15'] = q15_score
         
         # Q18 처리
         q18_score, q18_transcript = 0, "파일 없음"
         if st.session_state.q18_audio_file:
-            # Q18은 '눈을 감으세요'라는 문장이 포함되어야 합니다.
-            q18_score, q18_transcript = score_stt_response(st.session_state.q18_audio_file, target_keywords=["눈을 감으세요"]) 
+            temp_path = f"temp_q18_{st.session_state.q18_audio_file.name}_{datetime.datetime.now().strftime('%M%S')}"
+            with open(temp_path, "wb") as f: f.write(st.session_state.q18_audio_file.getbuffer())
+            q18_score, q18_transcript = score_stt_response(temp_path, target_keywords=["눈을 감으세요"])
+            if os.path.exists(temp_path): os.remove(temp_path)
         st.session_state.features['Q18'] = q18_score
 
         # 3. 모델 입력 준비 및 예측
@@ -354,11 +365,8 @@ def app():
             st.error(result_text)
         
         st.subheader("📊 채점 결과 요약")
-        # MMSE_KIND는 2로 고정, DIAG_SEQ는 1로 고정이지만 점수 합산에서는 제외해야 합니다.
-        # Q11과 Q13은 3개 문항이 1점으로 처리되므로, 합산 시 주의해야 합니다. 
-        # 본 MMSE 버전에서는 각 문항이 개별 점수로 취급되므로 그대로 더합니다.
         total_score = input_df.iloc[0].drop(['DIAG_SEQ', 'MMSE_KIND']).sum()
-        st.metric(label="총 점수 (Max 30점)", value=f"{total_score}점")
+        st.metric(label="총 점수 (Max 26점)", value=f"{total_score}점")
         
         st.caption(f"Q15 (따라 말하기) 채점: {q15_score}점 (STT 전사: {q15_transcript[:50]}...)")
         st.caption(f"Q18 (읽고 수행) 채점: {q18_score}점 (STT 전사: {q18_transcript[:50]}...)")
@@ -369,4 +377,6 @@ def app():
 
 
 if __name__ == "__main__":
+    from PIL import Image
+    import io
     app()
