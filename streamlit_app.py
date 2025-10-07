@@ -15,7 +15,7 @@ from PIL import Image
 import io
 from typing import List, Union
 import av # media 파일 처리 라이브러리 (streamlit-webrtc와 함께 사용됨)
-from pydub import AudioSegment # pydub을 사용하여 audio segment 처리 및 WAV 저장
+import soundfile as sf
 import threading # 오디오 데이터 처리를 위한 스레딩
 
 import warnings
@@ -224,42 +224,42 @@ def st_webrtc_audio_recorder(key, component_label):
     )
 
     # 오디오 데이터 처리 및 저장 버튼
-    if webrtc_ctx.audio_processor:
-        processor = webrtc_ctx.audio_processor
+    if st.button(f"저장 및 채점 ({component_label})", key=f"{key}_save_btn"):
+        st.warning("처리 중입니다. 잠시 기다려주세요...")
         
-        # 녹음 데이터가 있다면 저장 버튼 활성화
-        if st.button(f"저장 및 채점 ({component_label})", key=f"{key}_save_btn"):
-            st.warning("처리 중입니다. 잠시 기다려주세요...")
-            
-            # 1. 버퍼에서 데이터 추출
-            with processor.lock:
-                all_samples = np.concatenate(processor.samples, axis=0) if processor.samples else None
-                processor.samples = [] # 데이터 추출 후 버퍼 초기화
-            
-            if all_samples is None or all_samples.size == 0:
-                st.error("녹음된 오디오 데이터가 없습니다.")
-                return None
+        # 1. 버퍼에서 데이터 추출 (MyAudioProcessor 인스턴스에 접근하여 samples 추출)
+        # 이 로직은 webrtc_ctx.audio_processor가 MyAudioProcessor 인스턴스라는 가정 하에 작성됩니다.
+        if webrtc_ctx.audio_processor:
+             processor = webrtc_ctx.audio_processor
+             with processor.lock:
+                 all_samples = np.concatenate(processor.samples, axis=0) if processor.samples else None
+                 processor.samples = [] 
+        else:
+             all_samples = None
 
-            # 2. NumPy 배열을 pydub AudioSegment로 변환 및 저장
-            try:
-                # s16 (16비트 정수)로 가정
-                audio_segment = AudioSegment(
-                    all_samples.tobytes(), 
-                    frame_rate=48000, # WebRTC 기본 샘플링 속도 (환경에 따라 다를 수 있음)
-                    sample_width=all_samples.dtype.itemsize, 
-                    channels=1
-                )
-                
-                temp_audio_file = f"uploaded_{key}_{datetime.datetime.now().strftime('%M%S')}.wav"
-                audio_segment.export(temp_audio_file, format="wav")
-                
-                st.session_state[audio_path_key] = temp_audio_file
-                st.success(f"✅ 오디오 파일 저장 완료: {temp_audio_file}")
-                return temp_audio_file
-                
-            except Exception as e:
-                st.error(f"오디오 저장 실패: {e}")
-                return None
+        if all_samples is None or all_samples.size == 0:
+            st.error("녹음된 오디오 데이터가 없습니다.")
+            return None
+
+        # 2. 🔥 NumPy 배열을 soundfile을 사용해 WAV 파일로 저장 🔥
+        try:
+            # 16비트 정수 (s16) 데이터를 float32로 변환 (soundfile 권장 형식)
+            audio_data_float = all_samples.astype(np.float32) / 32768.0 
+            
+            temp_audio_file = f"uploaded_{key}_{datetime.datetime.now().strftime('%M%S')}.wav"
+            
+            # soundfile을 사용하여 WAV로 저장
+            sf.write(temp_audio_file, audio_data_float, 
+                     samplerate=48000, # WebRTC의 일반적인 샘플링 속도
+                     subtype='PCM_16') # 16-bit PCM 포맷 지정
+            
+            st.session_state[audio_path_key] = temp_audio_file
+            st.success(f"✅ 오디오 파일 저장 완료: {temp_audio_file}")
+            return temp_audio_file
+            
+        except Exception as e:
+            st.error(f"오디오 저장 실패 (soundfile 오류): {e}")
+            return None
     
     return st.session_state.get(audio_path_key)
 
